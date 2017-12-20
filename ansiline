@@ -1,0 +1,277 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use utf8;
+
+# Separate component specifically for rendering a prompt line.
+# Usage: ansiline OPTIONS TEXT
+# Options:
+#   --npc[=bash|zsh]   - indicate how to mark non-printing characters
+# Codes:
+#   rgbcmykw - set foreground color
+#   0        - reset colors, etc
+#   #000000  - set foreground color (24-bit)
+#   :        - set background color
+#   !        - bold
+#   /        - italic (TODO - toggle?) (TODO - use tput)
+#   {        - start a bubble, should be followed by new bg color
+#   }        - end a bubble, pops back the state
+#   < >      - insert a separator without push/pop
+#   *        - fill the line
+#   " "      - insert literal text
+#              \", \\, and \ue0b0 are accepted
+#   |        - line break
+#   [space]  - insert literal space
+#   S(e0b2,e0b0,e0b3,e0b1)  - change separators to e0b2, e0b0
+#                             second pair for non-color-changing
+#   S!()     - same as above but invert the colors
+#   F(#)     - change fill to #  (TODO - toggle random vs alternated)
+# Example:
+#   ansiline --npc=bash 'S(e0b2,e0b0):#ff8080  {!g:k "sdh@riose" }  *  {!w:k "Mon, Dec 18, 19:38:39" }  0|!b"~/config"0 "$ "'
+# Prints a string suitable for use as a Bash PS1 variable.
+
+binmode STDOUT, ":utf8";
+binmode STDERR, ":utf8";
+
+sub out {
+  local($_) = `$_[0] 2>/dev/null`;
+  chomp $_;
+  return $_;
+}
+
+my $cols = undef;
+my @npc = ('', '');
+my @sep = ();
+my $sep_inverted = 0;
+my @fill = ();
+
+sub main {
+  for (@_) {
+    if ($_ eq '--npc') {
+      # Look at $SHELL
+      # TODO(sdh): if that's unset, look at $$'s parent?
+      my $shell = $ENV{SHELL} || 'bash';
+      $shell =~ s|^.*/||;
+      $_ .= $shell;
+    }
+    if (s/^--npc=//) {
+      if (/zsh/) {
+	@npc = qw/%{ %}/;
+      } elsif (/bash/) {
+	@npc = qw/\[ \]/;
+      } else {
+	die "Unknown shell: \"$_\"";
+      }
+    } else {
+      render($_);
+    }
+  }
+}
+
+sub cols {
+  unless (defined $cols) {
+    $cols = $ENV{COLUMNS} || out('tput cols') || 80;
+  }
+  return $cols;
+}
+
+sub parse {
+  my $ref = shift;
+  local($_) = shift;
+  if (/^[0-9a-fA-F,]+$/) {
+    @$ref = ();
+    for (split /,/, $_) {
+      push @$ref, chr(hex($_));
+    }
+  } else {
+    @$ref = split //, $_;
+  }
+}
+
+my %COLORS = (k=>0, r=>1, g=>2, y=>3, b=>4, m=>5, c=>6, w=>7);
+# Given a color ('r', 'g', '#47fbca', etc) return an ANSI code.
+sub color_code {
+  # TODO(sdh): use 88-color and 256-color when truecolor is not present.
+  # Note: 88-color is normal 16, plus 4x4x4 (=64), and 8 grayscales
+  #         presumably it's the same codes as 256 but with different results,
+  #         - we'd need to check tput to determine max colors.
+  #       256-color is normal 16, plus 6x6x6 (=216), and 24 grayscale
+  #         OSC 38;5;<n>
+  #         0..7 standard, 8..15 high intensity, 16..231 (16+36r+6g+b), 232
+  # https://excess.org/article/2009/01/urwid-high-colour-support/
+  # https://en.wikipedia.org/wiki/ANSI_escape_code
+
+  # TODO(sdh): Consider special-casing 'k' to be #000000 when available?
+
+  local($_) = shift;
+  return $COLORS{$_} if defined $COLORS{$_};
+  die "Bad color: $_" unless s/^#//;
+  my $rgb = hex($_);
+  my $r = $rgb >> 16;
+  my $g = ($rgb >> 8) & 255;
+  my $b = $rgb & 255;
+  return "8;2;$r;$g;$b";
+}
+
+sub render {
+  our @curr; # current line, in fill-separated parts
+  our $len; # total printable length of current line
+  our $state = {fg => '', bg => '', b => 0, i => 0};
+  our @stack = ();
+
+  sub reset_state {
+    $state = {fg => '', bg => '', b => 0, i => 0};
+    osc_m('');
+  }
+
+  sub set_state {
+    my %new = %{shift()};
+    my @codes = ();
+    if ($new{fg} and $new{fg} ne $state->{fg}) {
+      push @codes, '3' . color_code($new{fg});
+      $state->{fg} = $new{fg};
+    }
+    if ($new{bg} and $new{bg} ne $state->{bg}) {
+      push @codes, '4' . color_code($new{bg});
+      $state->{bg} = $new{bg};
+    }
+    if ($new{b} and not $state->{b}) {
+      push @codes, '1';
+      $state->{b} = 1;
+    }
+    if ($new{i} and not $state->{i}) {
+      push @codes, '2';
+      $state->{i} = 1;
+    }
+    if (@codes) {
+      osc_m(join(';', @codes));
+    }
+  }
+
+  sub parse_colors {
+    local($_) = shift;
+    my $colors = {};
+    my $c = 'fg';
+    while ($_) {
+      $c = 'bg', next if s/^://;
+      $colors->{b} = 1, next if s/^!//;
+      $colors->{i} = 1, next if s|^/||;
+      $colors->{$c} = $&, next if s/^[rgbcmykw]//;
+      $colors->{$c} = $&, next if s/^#[0-9a-fA-F]{6}//;
+      die "Bad color: $_";
+    }
+    return $colors;
+  }
+
+  # Add a color change to the output
+  sub osc_m {
+    $curr[$#curr] .= "$npc[0]\e[$_[0]m$npc[1]";
+  }
+
+  # Add text to the output
+  sub emit {
+    $curr[$#curr] .= $_[0];
+    $len += length($_[0]);
+  }
+
+  # Handle a literal string
+  sub text {
+    local($_) = shift;
+    my @text = ();
+    while (s/([^\\"]+)(?:\\([\\"])|u([0-9a-fA-F]{4}))?//) {
+      push @text, $1;
+      if ($2) {
+	push @text, $2;
+      } elsif ($3) {
+	push @text, chr(hex($3));
+      }
+    }
+    emit(join('', @text));
+  }
+
+  my $needs_newline = 0;
+  local($_) = shift;
+  while (length $_) {
+    print '\n' if $needs_newline;
+    $needs_newline = 0;
+    @curr = ('');
+    $len = 0;
+    while (length $_) {
+      $sep_inverted = $1, parse(\@sep, $2), next if s/^S(!?)\(([^)]+)\)//;
+      parse(\@fill, $1), next if s/^F\(([^)]+)\)//;
+      push(@curr, ''), next if s/^\*//;
+      emit($&), next if s/^\s+//;
+      text($1), next if s/^"((?:[^\\"]|\\(?:"|u[0-9a-fA-F]{4}))*)"//;
+      last if s/^\|//;
+      reset_state(), next if s/^0//;
+      # Look for transition and/or color chars
+      my ($transition, $colors) = ('', '');
+      $transition = $& if s/^[<>{}]//;
+      $colors = $&
+	  if $transition ne '}' and s/^(?:[\/:rgbcmykw!]|#[0-9a-fA-F]{6})+//;
+      $colors = parse_colors($colors);
+      push @stack, {%$state} if $transition eq '{';
+      if ($transition and @sep) {
+	my $index = index('{}<>', $transition);
+	my $close = $index % 2;
+	$colors = pop @stack if $transition eq '}';
+	if ($colors->{bg}) {
+	  $index = $close;
+	  my $newbg = color_code($colors->{bg});
+	  # BG changed, so make a transition...
+	  if (!!$sep_inverted ^ $close) {
+	    if ($state->{bg}) {
+	      my $oldbg = color_code($state->{bg});
+	      osc_m("4$newbg;3$oldbg");
+	      $state->{bg} = $state->{fg} = '';
+	    } else {
+	      osc_m("4$newbg");
+	      $state->{bg} = '';
+	    }
+	  } else {
+	    osc_m("3$newbg");
+	    $state->{fg} = '';
+	  }
+	  emit($sep[$index % @sep]);
+	} else {
+	  emit($sep[$index % @sep]);
+	}
+	reset_state if $transition eq '}';
+      }
+      set_state($colors) if %$colors;
+      next if %$colors or $transition;
+      die "Bad code: $_";
+    }
+    # Handle end of line
+    if (@curr > 1) {
+      @fill = (' ') unless @fill;
+      local($_);
+      # There's a fill, so figure out how many remaining chars.
+      my $remainder = (cols() - $len);
+      my $fill = int($remainder / $#curr);
+      $remainder -= $fill * $#curr;
+      my $first = 1;
+      for (@curr) {
+	unless ($first) {
+	  my $count = $fill + ($remainder-- > 0 ? 1 : 0);
+	  if (@fill > 1) {
+	    for (1..$count) {
+	      print $fill[int(rand() * @fill)];
+	    }
+	  } else {
+	    print $fill[0] x $count;
+	  }
+	}
+	print $_;
+	$first = 0;
+      }
+      $needs_newline = 0;
+    } else {
+      print $curr[0];
+      $needs_newline = 1;
+    }
+  }
+}
+
+main(@ARGV);
