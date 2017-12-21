@@ -141,7 +141,7 @@ sub render {
       $state->{b} = 1;
     }
     if ($new{i} and not $state->{i}) {
-      push @codes, '2';
+      push @codes, '3';
       $state->{i} = 1;
     }
     if (@codes) {
