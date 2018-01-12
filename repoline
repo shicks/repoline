@@ -7,6 +7,8 @@ use Cwd qw/cwd/;
 use File::Basename qw/dirname/;
 use File::Path qw/mkpath/;
 
+# TODO(sdh): Rewrite to use ansiline.
+
 # TODO(sdh): Daemonize this so that we can have an async process always running
 # to keep things up to date.  Then return very quickly with (potentially) partial
 # information if the current info is stale [is there a way to watch a directory to
@@ -25,8 +27,9 @@ use File::Path qw/mkpath/;
 #   --left=TEXT   - text for left bubble.
 #   --right=TEXT  - text for right bubble.
 #   --prompt=TEXT - text for actual prompt.
-#   --style=STYLE - style for decoration (diag, box, or flag)
+#   --fill=STYLE  - style for fill (diag, box, flag, train, none)
 #   --sep=STYLE   - separator (triangle, round, fire...)
+#   --exit=CODE   - specify an exit code to go left of the left bubble.
 #
 # All options can be specified with environment variables using a REPO_ prefix
 # and the name in all caps.
@@ -47,6 +50,9 @@ use File::Path qw/mkpath/;
 # TODO(sdh): Allow registering custom handlers to get repo info for different
 # types of repos?  Easy enough to call asynchronously...?
 
+# TODO(sdh): handling of exit code is a hack, both in how we pass it and
+# also in how it's inserted artificially into a bubble - we'd rather have
+# an optional separator in the left bubble for it, if it's passed...
 
 # CONFIG: use perl plugins?
 # Need an API
@@ -63,158 +69,6 @@ use File::Path qw/mkpath/;
 #    - what about invalidation?
 #  * something to actually render prompts? conditional on repo type?
 #    resolution order...?
-
-# What about something simpler - a "builder" for a prompt line, w/ a simple
-# easy-to-read/write/understand format, but with minimal smarts about repo info
-#   - pass off repo info to separate tool, which can be customized separately?
-#   - other tool could spit out builder, or else json and this tool uses it?
-#     given that we want a different-looking prompt for each repo type, it seems
-#     like the json approach will be difficult; but who owns the color logic?
-
-# Separate, composable tools seems like a win.
-# One tool's business is just rendering colorful prompt lines with information
-# in them.  It shouldn't have any logic for picking the colors, etc.  But it does
-# need a way to *represent* them.  Input could look like
-
-# ```
-# bar {
-#   bg #80bc3f
-#   style triangle:3
-#   filler diag:2
-#   bubble {
-#     align left
-#     margin 3   <-- is this built into something else?
-#     bg black
-#     fg bold|green
-#     text sdh@riose
-#   }
-#   bubble {
-#     align left
-#     margin 3
-#     bg black
-#     text %{yellow}%{lightning}
-#   }
-#   bubble {
-#     align right
-#     margin 3
-#     bg black
-#     fg bold|white
-#     text Mon, Dec 18, 11:23:58
-#   }
-# }
-# line {
-#   partition {
-#     fg bold|blue
-#     text ~/src/repoline
-#   }
-#   partition {
-#     margin 1
-#     text $
-#   }
-# }
-# ```
-
-# Between partitions (which may have styles or separators to switch between
-# different background colors) and bubbles (which use a pair of separators)
-# this should handle all cases?  Maybe it's already too redundant in terms of
-# configuration options... what about a LaTeX-inspired approach?
-
-# ```
-# \def\bubble#1{{\margin{3}\style{triangle}\bg{black}#1}}
-# {
-#   \bg{#895bfc}
-#   \bubble{\fg{green}\bf sdh@riose}
-#   \hfill
-#   \bubble{\fg{white}\bf Mon, Dec 18, 11:23:58}
-# }
-# \\
-# {\fg{blue}\bf ~/src/repoline}
-# {\margin{1}`$`}
-# ```
-
-# Then we use a "line builder" approach to figure out spacing and blending?
-# Here we're mostly hard-coding the style bits, though we could possibly pull
-# out the "header" as an environment thing that could be swapped out as
-# needed?  That would provide pretty good separation between content and style
-#  - especially if macros are lazy, then we define a constant header, but then
-#    in the specific content can fill in `\def\repobg{\bg{#df24cd}}` along with
-#    the normal text:
-# ```
-# \repobg{#df24cd}\left{sdh@riose}\right{Mon, Dec 18, 11:23:58}\path{~/config}
-# ```
-# or at this point
-# ```
-# repobg #df24cd
-# left sdh@riose
-# right Mon, Dec 18, 11:23: 58
-# path ~/config
-# ```
-# This would require a bit more smarts in the formatter, i.e. conditionals for
-# empty stuff, etc? But if the format were a perl script that's fed a nested hash
-# with data in it, and had access to a number of useful libraries for blending
-# backgrounds with given styles (defaulting but overridable, etc) then it could
-# be pretty easy...?
-#
-# ```
-# my $bar = $output->line()->set_bg($_->{repobg});
-# $bar->child()->bg('black')->fg($_->{left.color} || 'green')
-#     ->bold()->text($data->{left}) if $_->{left};
-# $bar->hfill();
-# $bar->child()->bg('black')->fg(white)->bold()->text($_->{right})
-#     if $_->{right};
-# ```
-#
-# Level of nesting indicates whether separators are paired?
-# Or could make padding and margin a little less automatic?
-#
-# margin 2
-# padding 1  <-- or add explicit "pad 1": { bg black pad 1 ... pad 1 }
-#                in this model, each block or non-block gets padded?
-#                - but bottom line shouldn't be!
-# style triangle  <-- or flame, or bits, or ...?
-# bg $repobg
-# if $left
-#   { bg black fg green bold $left }
-# fi
-# hfill
-# if $right
-#   { bg black fg white bold $right }
-# fi
-# margin 2
-# line
-# if $reponame
-#   { fg yellow bold $reponame }
-#   sep  <-- if not changing bg color, need explicit sep (could have color)
-#   { fg blue bold $reporelative }
-# else
-#   { fg blue bold $path }
-# fi
-# "$"
-
-# Simpler format:
-#  - Multiple args - one for each line
-#  - Simple control chars:
-#      c() for color, using | to separate attrs, or fg/bg
-#      {() } for a bubble, will blend BG colors if different
-#        - the } will pop the previous state back
-#        - if no args then no delimiters?
-#      ... for a fill, will include the fill char if appropriate?
-#      >() or <() for a non-grouped delimiter, will also blend
-#      s() to change the style in-line (i.e. filler chars, separators, etc)
-#        - e.g. s(fill?=hash,sep=triangle), the ?= only sets if not configured
-#      "text" for literal non-whitespace text
-#  - Maybe not even that
-#      {(green/black,b,d?=triangle) "sdh@riose" } ... {(white/black,b,d?=triangle) "..." }
-#      >(green,d?=triangle)
-#
-# '/#00fa46  {!g/k "sdh@riose" }  *  {!w/k "Mon, Dec 18, 11:34:58" }  |!b"~/config"0 "$" '
-
-# '/#00fa46  {!g/k "sdh@riose" }  *  {!w/k "Mon, Dec 18, 11:34:58" }  |!b"~/config"0 "$" '
-
-
-# 'c(/#00fa46)  {(green/black|b) "sdh@riose" }  ...  {(white/black|b) "Mon, Dec 18, 11:34:58" }  '
-# 'c(blue|b)"~/config"c() "$" '
-
 
 sub main {
   my $cmd = shift;
@@ -243,7 +97,7 @@ sub read_args {
       ${$args{"$_:"}} = 1;
       next;
     }
-    unshift @_, $1 if s/^--[^=]+\K=(.*)$//;
+    unshift @_, $1 if s/=(.*)$//;
     help("Unknown arg: --$_") unless defined $args{$_};
     ${$args{$_}} = shift;
   }
@@ -255,14 +109,6 @@ sub repo_dirs {
   # Default to .git and .hg, but can add more with environment variable.
   return split /:/, $repo_dirs;
 }
-
-sub is_zsh {
-  return $ENV{SHELL} =~ m|/zsh$|;
-}
-
-# Open and close brackets for non-printing characters
-# (Turn on/off globally for now?)
-my @shell_npc = is_zsh() ? qw/%{ %}/ : qw/\[ \]/;
 
 # Finds the root of the current directory's repository.
 sub root {
@@ -277,7 +123,7 @@ sub root {
   return '';
 }
 
-# TODO(sdh): Add more fonts for styles
+# TODO(sdh): Add more fonts for fills
 #   http://www.fontspace.com/category/patterns
 #    - a number of options here
 #   http://www.fontspace.com/agasilva/maya-tiles-promo
@@ -288,24 +134,26 @@ sub do_prompt {
   # Handle args
   my $notouch = 1;
   my $columns = 0;
-  my $left = '%fG%u@%h';
-  my $right = '%fW%t';
-  my $prompt = '%fB%W%f0 $ ';
-  my $style = 'DEFAULT';
+  my $left = 'g!%u"@"%h';
+  my $right = 'w!%t';
+  my $prompt = 'b!%W0 "$" ';
+  my $fill = 'NONE';
   my $flag_fg = '';
   my $flag_bg = '';
   my $sep = 'TRIANGLE';
+  my $exit = 0;
   read_args {
       'notouch:' => \$notouch,
       columns => \$columns,
       left => \$left,
       right => \$right,
       prompt => \$prompt,
-      style => \$style,
+      fill => \$fill,
       fg => \$flag_fg,
       bg => \$flag_bg,
       sep => \$sep,
       dirs => \$repo_dirs,
+      exit => \$exit,
   }, @_;
   my $touch = $notouch;
   my $root = root();
@@ -314,67 +162,49 @@ sub do_prompt {
   $ansi_bg = $flag_bg if $flag_bg;
   $ansi_fg = $flag_fg if $flag_fg;
 
-  my $escapes = 0;
   $prompt = expand($prompt);
-  @shell_npc = ('', '') unless is_zsh();
-  $left = expand($left, \$escapes);
-  $right = expand($right, \$escapes);
+  $left = expand($left); # TODO(sdh): pass fg/bg/root/etc, to this?
+  $right = expand($right);
 
-  my %STYLES = (
-    DIAG => sub { my $r = int(rand() * 4); return $r ? chr($r + 0x2570) : ' ';  },
-    BOX => sub { return chr(int(rand() * 10) + 0x2596); },
-    FLAG => sub { return chr(int(rand() * 8) + 9776); },
-    TRAIN => sub { return '#'; },
-    DEFAULT => sub { return ' '; },
+  my %FILL = (
+    DIAG => 'F(2571,2572,2573,20)',
+    BOX => 'F(2596,2597,2598,2599,259a,259b,259c,259d,259e,259f)',
+    FLAG => 'F(9776,9777,9778,9779,977a,977b,977c,977d)',
+    TRAIN => 'F(#)',
+    NONE => '',
   );
-  die "No such style: $style" unless defined $STYLES{uc $style || 'DEFAULT'};
-  $style = $STYLES{uc $style || 'DEFAULT'};
+  die "No such fill: $fill" unless defined $FILL{uc $fill || 'NONE'};
+  $fill = $FILL{uc $fill || 'NONE'};
 
   my %SEP = (
-    TRIANGLE => [0xe0b2, 0xe0b0],
-    ROUND => [0xe0b6, 0xe0b4],
-    DOWN => [0xe0be, 0xe0b8],
-    UP => [0xe0ba, 0xe0bc],
-    SPLIT => [0xe0d4, 0xe0d2],
-    #RSPLIT => [0xe0d2, 0xe0d4], # TODO - needs swap fg/bg
-    FIRE => [0xe0c2, 0xe0c0],
-    DISSOLVE => [0xe0c7, 0xe0c6], # smaller one (5,4) ugly at console font size
-    NONE => [0x20, 0x20],
+    TRIANGLE => 'S(e0b2,e0b0,e0b3,e0b1)',
+    ROUND => 'S(e0b6,e0b4,e0b7,e0b5)',
+    DOWN => 'S(e0be,e0b8)',
+    UP => 'S(e0ba,e0bc)',
+    SPLIT => 'S(e0d4,e0d2)',
+    RSPLIT => 'S!(e0d2,e0d4)',
+    FIRE => 'S(e0c2,e0c0)',
+    DISSOLVE => 'S(e0c7,e0c6)', # smaller one (5,4) ugly at console font size
+    NONE => 'S()',
   );
   die "No such separator: $sep" unless defined $SEP{uc $sep || 'TRIANGLE'};
-  my ($open, $close) = @{$SEP{uc $sep || 'TRIANGLE'}};
-  $open = chr $open; $close = chr $close;
+  $sep = $SEP{uc $sep || 'TRIANGLE'};
 
-  my $OSC = "$shell_npc[0]\e[";
-  my $m = "m$shell_npc[1]";
-
-  $columns = `tput cols`, chomp $columns unless $columns;
-  my $dashes = $columns - length($left) - length($right) + $escapes;
-  my $out = is_zsh() ? \*STDOUT : \*STDERR; # TODO(sdh): argument to make this STDERR ?
-  if ($ansi_bg eq '0') { # NOTE: currently never runs, since we changed the blank default
-    print $out "${OSC}1;30${m}———($OSC$m$left$OSC$m${OSC}30$m)";
-    print $out '—' x ($dashes - 10);
-    print $out "($OSC$m$right${OSC}30$m)———$OSC$m";
+  # TODO(sdh): include last exit code ?
+  my $line;
+  if ($ansi_bg eq '0') {
+    $exit = $exit ? "(r\"$exit\"k)——" : '';
+    $line = sprintf('F(—)!k"———%s("0%s!k")"*"("0%s!k")———"|0%s0',
+		    $exit, $left, $right, $prompt);
   } else {
-    # TODO(sdh): figure out if terminal is running powerline fonts (maybe just a list of
-    # known terminals that do support it?). Fall back on parens or something else?
-    binmode $out, ":utf8";
-    #my ($open, $close) = (chr 0xe0b2, chr 0xe0b0);
-    my $main = "${OSC}1;3${ansi_fg};4${ansi_bg}$m";
-    $open = "$OSC$m${OSC}30;4${ansi_bg}$m  ${open}";
-    # $close = "${OSC}1;38;2;0;0;0;4${ansi_bg}$m${close}${main} ";
-    $close = "${OSC}30;4${ansi_bg}$m${close}${main} ";
-    $dashes -= 8 if $left;
-    $dashes -= 8 if $right;
-    $left = "${open}$OSC$m ${left} $OSC$m${close} " if $left;
-    $right = "${open}$OSC$m ${right} $OSC$m${close} " if $right;
-    print $out $main;
-    print $out $left;
-    print $out (&$style()) for (1..$dashes);
-    print $out $right;
-    print $out "$OSC$m";
+    $exit = $exit ? "r!\"$exit\" $bg< " : '';
+    $exit =~ s/</"|"/ if length($sep) < 14;
+    $line = sprintf('%s%s%s:%s  {:#000000 %s%s } * {:#000000 %s }  |0%s0',
+		    $fill, $sep, $fg, $bg, $exit, $left, $right, $prompt);
   }
-  print $prompt;
+  my $ansiline = dirname($0) . '/ansiline';
+  system $ansiline, '--npc', $line;
+  # print $line;
 }
 
 sub do_colors {
@@ -429,7 +259,8 @@ sub find_colors {
   local $_;
   my ($touch, $root) = @_;
   # my $blank = '#000000 #666666 0 7';
-  my $blank = '#000000 #666666 ' . to_ansi('#666666') . ' ' . to_ansi('#000000'); #8;2;0;0;0 8;2;255;255;255';
+  #my $blank = '#000000 #666666 ' . to_ansi('#666666') . ' ' . to_ansi('#000000'); #8;2;0;0;0 8;2;255;255;255';
+  my $blank = '#666666 #000000 ' . to_ansi('#666666') . ' ' . to_ansi('#000000'); #8;2;0;0;0 8;2;255;255;255';
   return $blank unless $root;
   (my $root_scrubbed = $root) =~ s|/|!|g; # don't worry about collisions
   my $dir = $ENV{REPO_COLOR_DIR} || "$ENV{HOME}/.repo_colors";
@@ -549,39 +380,22 @@ sub pick_color {
 # Expands prompt text.
 sub expand {
   local($_) = shift;
-  my $escapes = shift;
   # TODO(sdh): support more args?
-  $_ =~ s/%([uhHtW%]|[fb].)/expand_char($1, $escapes)/eg;
+  $_ =~ s/%([uhHtW%])/expand_char($1)/eg;
   return $_;
 }
 
+sub dq { "\"$_[0]\"" }
+
 sub expand_char {
   local($_) = shift;
-  my $escapes = shift;
-  return '%' if $_ eq '%';
-  return $ENV{USER} if $_ eq 'u';
-  return long_host() if $_ eq 'H';
-  return short_host() if $_ eq 'h';
-  return date_time() if $_ eq 't';
-  return short_dir() if $_ eq 'W';
-  if (/^[fb]0$/) {
-    $$escapes += 3;
-    return "$shell_npc[0]\e[m$shell_npc[1]";
-  }
-  if (s/^([fb])//) {
-    my $base = $1 eq 'f' ? 3 : 4;
-    my $code = "$shell_npc[0]\e[";
-    $code .= '1;' if y/A-Z/a-z/;
-    my %colors = (r=>1, g=>2, y=>3, b=>4, m=>5, c=>6, w=>7);
-    # TODO - access to repo colors?!?
-    return unless defined $colors{$_}; # TODO - error?
-    $code .= $base;
-    $code .= ($colors{$_} || 0);
-    $code .= "m$shell_npc[1]";
-    $$escapes += length($code);
-    return $code;
-  }
-  return '';
+  return dq('%') if $_ eq '%';
+  return dq($ENV{USER}) if $_ eq 'u';
+  return dq(long_host()) if $_ eq 'H';
+  return dq(short_host()) if $_ eq 'h';
+  return dq(date_time()) if $_ eq 't';
+  return dq(short_dir()) if $_ eq 'W';
+  die "Bad escape: $_";
 }
 
 # TODO(sdh): Find a better way to branch these.

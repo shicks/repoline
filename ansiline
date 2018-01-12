@@ -53,7 +53,7 @@ sub main {
       # TODO(sdh): if that's unset, look at $$'s parent?
       my $shell = $ENV{SHELL} || 'bash';
       $shell =~ s|^.*/||;
-      $_ .= $shell;
+      $_ .= "=$shell";
     }
     if (s/^--npc=//) {
       if (/zsh/) {
@@ -106,7 +106,7 @@ sub color_code {
 
   local($_) = shift;
   return $COLORS{$_} if defined $COLORS{$_};
-  die "Bad color: $_" unless s/^#//;
+  die "Bad color: \"$_\"" unless s/^#//;
   my $rgb = hex($_);
   my $r = $rgb >> 16;
   my $g = ($rgb >> 8) & 255;
@@ -159,7 +159,7 @@ sub render {
       $colors->{i} = 1, next if s|^/||;
       $colors->{$c} = $&, next if s/^[rgbcmykw]//;
       $colors->{$c} = $&, next if s/^#[0-9a-fA-F]{6}//;
-      die "Bad color: $_";
+      die "Bad color: \"$_\"";
     }
     return $colors;
   }
@@ -193,13 +193,13 @@ sub render {
   my $needs_newline = 0;
   local($_) = shift;
   while (length $_) {
-    print '\n' if $needs_newline;
+    print "\n" if $needs_newline;
     $needs_newline = 0;
     @curr = ('');
     $len = 0;
     while (length $_) {
-      $sep_inverted = $1, parse(\@sep, $2), next if s/^S(!?)\(([^)]+)\)//;
-      parse(\@fill, $1), next if s/^F\(([^)]+)\)//;
+      $sep_inverted = $1, parse(\@sep, $2), next if s/^S(!?)\(([^)]*)\)//;
+      parse(\@fill, $1), next if s/^F\(([^)]*)\)//;
       push(@curr, ''), next if s/^\*//;
       emit($&), next if s/^\s+//;
       text($1), next if s/^"((?:[^\\"]|\\(?:"|u[0-9a-fA-F]{4}))*)"//;
@@ -212,30 +212,24 @@ sub render {
 	  if $transition ne '}' and s/^(?:[\/:rgbcmykw!]|#[0-9a-fA-F]{6})+//;
       $colors = parse_colors($colors);
       push @stack, {%$state} if $transition eq '{';
-      if ($transition and @sep) {
+      if ($transition) {
 	my $index = index('{}<>', $transition);
 	my $close = $index % 2;
 	$colors = pop @stack if $transition eq '}';
 	if ($colors->{bg}) {
 	  $index = $close;
-	  my $newbg = color_code($colors->{bg});
 	  # BG changed, so make a transition...
+	  my $newbg = color_code($colors->{bg});
+	  my $oldbg = color_code($state->{bg} || '#000000');
 	  if (!!$sep_inverted ^ $close) {
-	    if ($state->{bg}) {
-	      my $oldbg = color_code($state->{bg});
-	      osc_m("4$newbg;3$oldbg");
-	      $state->{bg} = $state->{fg} = '';
-	    } else {
-	      osc_m("4$newbg");
-	      $state->{bg} = '';
-	    }
+	    osc_m("4$newbg;3$oldbg");
 	  } else {
-	    osc_m("3$newbg");
-	    $state->{fg} = '';
+	    osc_m("3$newbg;4$oldbg");
 	  }
-	  emit($sep[$index % @sep]);
+	  $state->{fg} = $state->{bg} = '';
+	  emit($sep[$index % @sep]) if @sep;
 	} else {
-	  emit($sep[$index % @sep]);
+	  emit($sep[$index % @sep]) if @sep;
 	}
 	reset_state if $transition eq '}';
       }
