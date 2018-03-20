@@ -147,6 +147,9 @@ sub render {
     if (@codes) {
       osc_m(join(';', @codes));
     }
+    # TODO - 23 to unset italic, 22 to unset bold
+    # TODO - 2 sets 'faint' mode, which in alacritty is just a paler color
+    #  - we could possibly use that (though it only would help for 8-color mode)
   }
 
   sub parse_colors {

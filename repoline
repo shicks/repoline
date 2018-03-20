@@ -2,12 +2,11 @@
 
 use strict;
 use warnings;
+use utf8;
 
 use Cwd qw/cwd/;
-use File::Basename qw/dirname/;
+use File::Basename qw/basename dirname/;
 use File::Path qw/mkpath/;
-
-# TODO(sdh): Rewrite to use ansiline.
 
 # TODO(sdh): Daemonize this so that we can have an async process always running
 # to keep things up to date.  Then return very quickly with (potentially) partial
@@ -17,22 +16,34 @@ use File::Path qw/mkpath/;
 # as soon as it happens, we could possibly avoid showing the wrong data].
 
 # Usage:
-#   repoline prompt  -- prints a prompt string
+
+# repoline prompt  -- prints a prompt string
 # Options (SUBJECT TO CHANGE):
-#   --dirs=DIRS   - a colon-separate list of top-level dirs for repository
-#   --fg=CODE     - use a fixed color instead.
-#   --bg=CODE     - use a fixed color instead.
-#   --notouch     - does not touch the color files or make new ones.
-#   --columns=COL - total number of columns.
-#   --left=TEXT   - text for left bubble.
-#   --right=TEXT  - text for right bubble.
-#   --prompt=TEXT - text for actual prompt.
-#   --fill=STYLE  - style for fill (diag, box, flag, train, none)
-#   --sep=STYLE   - separator (triangle, round, fire...)
-#   --exit=CODE   - specify an exit code to go left of the left bubble.
+#   --dirs=DIRS     - a colon-separate list of top-level dirs for repository
+#   --fg=CODE       - use a fixed color instead.
+#   --bg=CODE       - use a fixed color instead.
+#   --notouch       - does not touch the color files or make new ones.
+#   --columns=COL   - total number of columns.
+#   --left=TEXT     - text for left bubble.
+#   --right=TEXT    - text for right bubble.
+#   --wprompt=TEXT  - text for prompt if in a simple directory
+#   --rprompt=TEXT  - text for prompt if in a repo
+#   --fill=STYLE    - style for fill (diag, box, flag, train, none)
+#   --sep=STYLE     - separator (triangle, round, fire...)
+#   --exit=CODE     - specify an exit code to go left of the left bubble.
+#   # --pid=PID     - add pid of the shell to left bubble.
+
+# repoline colors  -- prints the current colors as "#fg:#bg"
+# Options (SUBJECT TO CHANGE):
+#   --dirs=DIRS     - a colon-separate list of top-level dirs for repository
+#   --notouch       - does not touch the color files or make new ones.
+#   --ansi          - return colors as ansi r;g;b numbers.
+#   --path=PATH     - use the given path instead of pwd
 #
 # All options can be specified with environment variables using a REPO_ prefix
 # and the name in all caps.
+
+# repoline reset  -- resets the color for this repo
 
 # TODO(sdh): Support multiple bubbles, percent-codes for e.g. user/host, date/time,
 # dir, abbrev-dir (optional function to call to abbreviate?), repo status, etc
@@ -72,8 +83,17 @@ use File::Path qw/mkpath/;
 
 sub main {
   my $cmd = shift;
-  die 'Usage: repoline prompt' unless $cmd eq 'prompt';
-  do_prompt(@_);
+  if ($cmd eq 'prompt') {
+    do_prompt(@_);
+  } elsif ($cmd eq 'colors') {
+    do_colors(@_);
+  } elsif ($cmd eq 'print') {
+    do_print(@_);
+  } elsif ($cmd eq 'reset') {
+    do_reset(@_);
+  } else {
+    die 'Usage: repoline prompt' unless $cmd eq 'prompt';
+  }
 }
 
 sub help {
@@ -84,42 +104,66 @@ sub help {
 
 # Reads arguments, either from 
 sub read_args {
+  my $anon = 0;
   my %args = %{shift()};
   for my $key (keys %args) {
-    my $env = uc "repo_$key";
+    next unless $key;
+    my $env = uc "REPO_$key";
     $env =~ s/^--|:$//g;
     ${$args{$key}} = $ENV{$env} if defined $ENV{$env};
   }
   while ($_ = shift) {
-    help("Unknown arg: $_") unless s/^--//;
-    if (defined $args{"$_:"}) {
-      # TODO(sdh): consider allowing optional arg and not choking?
-      ${$args{"$_:"}} = 1;
-      next;
+    if (s/^--//) {
+      if (defined $args{"$_:"}) {
+        # TODO(sdh): consider allowing optional arg and not choking?
+        ${$args{"$_:"}} = 1;
+        next;
+      }
+      unshift @_, $1 if s/=(.*)$//;
+      help("Unknown arg: --$_") unless defined $args{$_};
+      ${$args{$_}} = shift;
+    } else {
+      help("Unknown arg: $_") unless $args{''};
+      ++$anon;
+      if (ref $args{''} eq 'ARRAY') {
+        push @{$args{''}}, $_;
+      } elsif (ref $args{''} eq 'SCALAR') {
+        die "Too many positional params" unless $anon == 1;
+        ${$args{''}} = $_;
+      } else {
+        die "Bad type: " . ref $args{''};
+      }
     }
-    unshift @_, $1 if s/=(.*)$//;
-    help("Unknown arg: --$_") unless defined $args{$_};
-    ${$args{$_}} = shift;
   }
 }
 
-my $repo_dirs = '.git:.hg';
+my $repo_dirs = '.git:.hg:.citc';
 # Returns a list of repo directory names that can appear in repo roots.
 sub repo_dirs {
   # Default to .git and .hg, but can add more with environment variable.
   return split /:/, $repo_dirs;
 }
 
+my $root = undef;
 # Finds the root of the current directory's repository.
 sub root {
-  my $dir = cwd();
+  return $root if defined $root;
+  my $dir = $ENV{PWD}; # cwd();
   my @repo_dirs = repo_dirs();
   while (length $dir > 1) {
     for (@repo_dirs) {
-      return $dir if -e "$dir/$_";
+      return ($root = $dir) if -e "$dir/$_";
     }
     $dir = dirname($dir);
  }
+  return ($root = '');
+}
+
+sub repo_type {
+  my $root = root();
+  for (repo_dirs()) {
+    return substr($_, 1) if -d "$root/$_";
+  }
   return '';
 }
 
@@ -136,24 +180,28 @@ sub do_prompt {
   my $columns = 0;
   my $left = 'g!%u"@"%h';
   my $right = 'w!%t';
-  my $prompt = 'b!%W0 "$" ';
+  my $wprompt = 'b!%W S(276f)r>y>g>0 '; # ❯
+  my $rprompt = 'y!%r%b0 b!%Ry! S(276f)r>y>g>0 ';
   my $fill = 'NONE';
   my $flag_fg = '';
   my $flag_bg = '';
   my $sep = 'TRIANGLE';
   my $exit = 0;
+  #my $pid = 0;
   read_args {
       'notouch:' => \$notouch,
       columns => \$columns,
       left => \$left,
       right => \$right,
-      prompt => \$prompt,
+      wprompt => \$wprompt,
+      rprompt => \$rprompt,
       fill => \$fill,
       fg => \$flag_fg,
       bg => \$flag_bg,
       sep => \$sep,
       dirs => \$repo_dirs,
       exit => \$exit,
+      #pid => \$pid,
   }, @_;
   my $touch = $notouch;
   my $root = root();
@@ -162,7 +210,7 @@ sub do_prompt {
   $ansi_bg = $flag_bg if $flag_bg;
   $ansi_fg = $flag_fg if $flag_fg;
 
-  $prompt = expand($prompt);
+  my $prompt = expand($root ? $rprompt : $wprompt);
   $left = expand($left); # TODO(sdh): pass fg/bg/root/etc, to this?
   $right = expand($right);
 
@@ -199,6 +247,7 @@ sub do_prompt {
   } else {
     $exit = $exit ? "r!\"$exit\" $bg< " : '';
     $exit =~ s/</"|"/ if length($sep) < 14;
+    #$left = $pid ? "$left 0$fg> \"$pid\"" : $left;
     $line = sprintf('%s%s%s:%s  {:#000000 %s%s } * {:#000000 %s }  |0%s0',
 		    $fill, $sep, $fg, $bg, $exit, $left, $right, $prompt);
   }
@@ -207,6 +256,7 @@ sub do_prompt {
   # print $line;
 }
 
+# TODO - consider replacing this with print -F '%F:%B' or something?
 sub do_colors {
   # Handle args
   my $touch = 1;
@@ -219,6 +269,8 @@ sub do_colors {
     $get_fg = 0, next if $_ eq '--bg';
     $get_bg = 0, next if $_ eq '--fg';
     $ansi = 1, next if $_ eq '--ansi';
+    $repo_dirs = shift(), next if $_ eq '--dirs';
+    $ENV{PWD} = shift(), next if $_ eq '--path';
     help(1);
   }
   my $root = root();
@@ -284,7 +336,7 @@ sub find_colors {
     # Truncate down to 10
     while (@files > 10) {
       my $file = (pop @files)->[0];
-      unlink "$dir/$file";
+      unlink "$file";
     }
     my @colors = map { read_file($_->[0]) } @files;
     $color = pick_color(@colors);
@@ -377,11 +429,28 @@ sub pick_color {
   return $costs[0]->[0];
 }
 
+sub do_print {
+  # Handle args
+  my $notouch = 1;
+  my $fmt = '';
+  read_args {
+      'notouch:' => \$notouch,
+      dirs => \$repo_dirs,
+      '' => \$fmt,
+  }, @_;
+  my $touch = $notouch;
+  my $root = root();
+  #my $colors = $flag_fg && $flag_bg ? '' : find_colors($touch, $root);
+  die "Expected format string" unless $fmt;
+  print expand($fmt);
+  exit;
+}
+
 # Expands prompt text.
 sub expand {
   local($_) = shift;
   # TODO(sdh): support more args?
-  $_ =~ s/%([uhHtW%])/expand_char($1)/eg;
+  $_ =~ s/%([uhHtWrRb%])/expand_char($1)/eg;
   return $_;
 }
 
@@ -395,6 +464,9 @@ sub expand_char {
   return dq(short_host()) if $_ eq 'h';
   return dq(date_time()) if $_ eq 't';
   return dq(short_dir()) if $_ eq 'W';
+  return dq(short_repo_dir()) if $_ eq 'R';
+  return dq(short_repo_name()) if $_ eq 'r';
+  return dq(short_repo_branch()) if $_ eq 'b';
   die "Bad escape: $_";
 }
 
@@ -423,6 +495,63 @@ sub short_dir {
   my $pwd = $ENV{PWD};
   $pwd =~ s/^$ENV{HOME}/~/;
   return $pwd;
+}
+
+sub short_repo_dir {
+  # Figure out the repo root if there is one...
+  my $root = root();
+  my $pwd = $ENV{PWD};
+  $pwd =~ s|$root?|#|;
+  $pwd =~ s/^$ENV{HOME}/~/;
+  return $pwd;
+}
+
+sub short_repo_name {
+  # TODO - allow customizing a little?
+  # TODO - use the type a little better?
+  # TODO - maybe read environment var to get this (but emacs...?)
+  my $type = repo_type();
+  $type = '' if $type eq 'git'; # TODO - make this less hacky
+  my $root = root();
+  my $name = basename($root);
+  # Exception: if a directory is just a number, include the parent as well
+  # (this is useful for git mirrors).
+  $name = basename(dirname $root) . "/$name" if $name =~ /^\d+$/;
+  return $type && $name ? "$type:$name" : $root ? $name : '';
+}
+
+sub short_repo_branch {
+  my $root = root();
+  if (-e "$root/.git/HEAD") {
+    my $head = `cat $root/.git/HEAD`;
+    if ($head =~ m|ref: refs/heads/(.*)|) {
+      my $branch = ":$1";
+      $head = `cat $root/.git/refs/heads/$1`;
+      $branch = $branch . '(' . substr($head, 0, 7) . ')'
+          if $head =~ /^[0-9a-f]+$/i;
+      return $branch;
+    } elsif ($head =~ /^[0-9a-f]+$/i) {
+      return ':' . substr($head, 0, 7);
+    }
+    return '';
+  }
+  if (-e "$root/.hg") {
+    # TODO - seems slower to get this, maybe read from env, get async?
+    # TODO - CL numbers, etc?
+  }
+  return '';
+}
+
+sub do_reset {
+  read_args {
+      dirs => \$repo_dirs,
+  }, @_;
+  my $root = root();
+  (my $root_scrubbed = $root) =~ s|/|!|g; # don't worry about collisions
+  my $dir = $ENV{REPO_COLOR_DIR} || "$ENV{HOME}/.repo_colors";
+  mkpath [$dir], 1, 0755 unless -d $dir;
+  my $file = "$dir/$root_scrubbed";
+  unlink $file;
 }
 
 # Just do it,
