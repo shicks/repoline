@@ -48,6 +48,10 @@ my @fill = ();
 
 sub main {
   for (@_) {
+    if (s/^--columns=//) {
+      $cols = $_;
+      next;
+    }
     if ($_ eq '--npc') {
       # Look at $SHELL
       # TODO(sdh): if that's unset, look at $$'s parent?
@@ -111,6 +115,8 @@ sub color_code {
   my $r = $rgb >> 16;
   my $g = ($rgb >> 8) & 255;
   my $b = $rgb & 255;
+  # Note: the following makes for much easier debugging:
+  # return $r>($g+$b)/2 ? 1 : $g>($r+$b)/2 ? 2 : 4;
   return "8;2;$r;$g;$b";
 }
 
@@ -263,11 +269,10 @@ sub render {
 	print $_;
 	$first = 0;
       }
-      $needs_newline = 0;
     } else {
       print $curr[0];
-      $needs_newline = 1;
     }
+    $needs_newline = 1;
   }
 }
 

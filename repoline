@@ -32,6 +32,7 @@ use File::Path qw/mkpath/;
 #   --sep=STYLE     - separator (triangle, round, fire...)
 #   --exit=CODE     - specify an exit code to go left of the left bubble.
 #   # --pid=PID     - add pid of the shell to left bubble.
+#  --ansiline=ARG   - add args to pass directly to ansiline (may be repeated)
 
 # repoline colors  -- prints the current colors as "#fg:#bg"
 # Options (SUBJECT TO CHANGE):
@@ -121,7 +122,13 @@ sub read_args {
       }
       unshift @_, $1 if s/=(.*)$//;
       help("Unknown arg: --$_") unless defined $args{$_};
-      ${$args{$_}} = shift;
+      if (ref $args{$_} eq 'ARRAY') {
+        push @{$args{$_}}, shift;
+      } elsif (ref $args{$_} eq 'SCALAR') {
+        ${$args{$_}} = shift;
+      } else {
+        die "Bad type: " . ref $args{$_};
+      }
     } else {
       help("Unknown arg: $_") unless $args{''};
       ++$anon;
@@ -187,6 +194,7 @@ sub do_prompt {
   my $flag_bg = '';
   my $sep = 'TRIANGLE';
   my $exit = 0;
+  my @ansiline = ();
   #my $pid = 0;
   read_args {
       'notouch:' => \$notouch,
@@ -201,6 +209,7 @@ sub do_prompt {
       sep => \$sep,
       dirs => \$repo_dirs,
       exit => \$exit,
+      ansiline => \@ansiline,
       #pid => \$pid,
   }, @_;
   my $touch = $notouch;
@@ -233,6 +242,7 @@ sub do_prompt {
     RSPLIT => 'S!(e0d2,e0d4)',
     FIRE => 'S(e0c2,e0c0)',
     DISSOLVE => 'S(e0c7,e0c6)', # smaller one (5,4) ugly at console font size
+    AIRLINE => 'S(25c0,25b6)',
     NONE => 'S()',
   );
   die "No such separator: $sep" unless defined $SEP{uc $sep || 'TRIANGLE'};
@@ -242,17 +252,17 @@ sub do_prompt {
   my $line;
   if ($ansi_bg eq '0') {
     $exit = $exit ? "(r\"$exit\"k)——" : '';
-    $line = sprintf('F(—)!k"———%s("0%s!k")"*"("0%s!k")———"|0%s0',
+    $line = sprintf('F(—)!k"———%s("0%s!k")"*"("0%s!k")———"0|%s0',
 		    $exit, $left, $right, $prompt);
   } else {
     $exit = $exit ? "r!\"$exit\" $bg< " : '';
     $exit =~ s/</"|"/ if length($sep) < 14;
     #$left = $pid ? "$left 0$fg> \"$pid\"" : $left;
-    $line = sprintf('%s%s%s:%s  {:#000000 %s%s } * {:#000000 %s }  |0%s0',
+    $line = sprintf('%s%s%s:%s  {:#000000 %s%s } * {:#000000 %s }  0|%s0',
 		    $fill, $sep, $fg, $bg, $exit, $left, $right, $prompt);
   }
   my $ansiline = dirname($0) . '/ansiline';
-  system $ansiline, '--npc', $line;
+  system $ansiline, '--npc', @ansiline, $line;
   # print $line;
 }
 
