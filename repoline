@@ -162,14 +162,14 @@ sub root {
       return ($root = $dir) if -e "$dir/$_";
     }
     $dir = dirname($dir);
- }
+  }
   return ($root = '');
 }
 
 sub repo_type {
   my $root = root();
   for (repo_dirs()) {
-    return substr($_, 1) if -d "$root/$_";
+    return substr($_, 1) if -e "$root/$_";
   }
   return '';
 }
@@ -520,23 +520,36 @@ sub short_repo_name {
   # TODO - allow customizing a little?
   # TODO - use the type a little better?
   # TODO - maybe read environment var to get this (but emacs...?)
-  my $type = repo_type();
-  $type = '' if $type eq 'git'; # TODO - make this less hacky
   my $root = root();
   my $name = basename($root);
+  return $name unless $root;
   # Exception: if a directory is just a number, include the parent as well
   # (this is useful for git mirrors).
   $name = basename(dirname $root) . "/$name" if $name =~ /^\d+$/;
-  return $type && $name ? "$type:$name" : $root ? $name : '';
+  my $type = repo_type();
+  return $name if $type eq 'git';
+  return "c:$name" if $type eq 'citc';
+  return "$type:$name";
 }
 
 sub short_repo_branch {
   my $root = root();
-  if (-e "$root/.git/HEAD") {
-    my $head = `cat $root/.git/HEAD`;
+  my $gitdir = "$root/.git";
+  unless (-f $gitdir) {
+    # git-g4 stores all gitdirs in ~/gitg4/*.git, so check that, too
+    my $name = basename($root);
+    $gitdir = "$ENV{HOME}/gitg4/$name.git";
+  }
+  if (-f "$gitdir") {
+    open GIT, '<', $gitdir;
+    local ($_) = <GIT>;
+    $gitdir = $1 if /gitdir: (.*)/ and -d $1;
+  }
+  if (-e "$gitdir/HEAD") {
+    my $head = `cat $gitdir/HEAD`;
     if ($head =~ m|ref: refs/heads/(.*)|) {
       my $branch = ":$1";
-      $head = `cat $root/.git/refs/heads/$1`;
+      $head = `cat $gitdir/refs/heads/$1`;
       $branch = $branch . '(' . substr($head, 0, 7) . ')'
           if $head =~ /^[0-9a-f]+$/i;
       return $branch;
