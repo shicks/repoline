@@ -535,7 +535,7 @@ sub short_repo_name {
 sub short_repo_branch {
   my $root = root();
   my $gitdir = "$root/.git";
-  unless (-f $gitdir) {
+  unless (-e $gitdir) {
     # git-g4 stores all gitdirs in ~/gitg4/*.git, so check that, too
     my $name = basename($root);
     $gitdir = "$ENV{HOME}/gitg4/$name.git";
@@ -543,6 +543,7 @@ sub short_repo_branch {
   if (-f "$gitdir") {
     open GIT, '<', $gitdir;
     local ($_) = <GIT>;
+    close GIT;
     $gitdir = $1 if /gitdir: (.*)/ and -d $1;
   }
   if (-e "$gitdir/HEAD") {
