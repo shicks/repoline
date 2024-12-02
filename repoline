@@ -32,7 +32,7 @@ use File::Path qw/mkpath/;
 #   --sep=STYLE     - separator (triangle, round, fire...)
 #   --exit=CODE     - specify an exit code to go left of the left bubble.
 #   # --pid=PID     - add pid of the shell to left bubble.
-#  --ansiline=ARG   - add args to pass directly to ansiline (may be repeated)
+#   --ansiline=ARG  - add args to pass directly to ansiline (may be repeated)
 
 # repoline colors  -- prints the current colors as "#fg:#bg"
 # Options (SUBJECT TO CHANGE):
@@ -58,6 +58,7 @@ use File::Path qw/mkpath/;
 #     -- want to be able to both PRINT and set the PROMPT
 #     -- maybe pass to EVAL???
 # TODO(sdh): Option to print \[ and \] needed for bash to handle ansi properly?
+#            NOTE: --ansiline=--npc=bash works for this.
 
 # TODO(sdh): Allow registering custom handlers to get repo info for different
 # types of repos?  Easy enough to call asynchronously...?
@@ -188,7 +189,7 @@ sub do_prompt {
   my $left = 'g!%u"@"%h';
   my $right = 'w!%t';
   my $wprompt = 'b!%W S(276f)r>y>g>0 '; # ❯
-  my $rprompt = 'y!%r%b0 b!%Ry! S(276f)r>y>g>0 ';
+  my $rprompt = 'y!%r%b0 b!%R S(276f)r>y>g>0 ';
   my $fill = 'NONE';
   my $flag_fg = '';
   my $flag_bg = '';
@@ -219,14 +220,10 @@ sub do_prompt {
   $ansi_bg = $flag_bg if $flag_bg;
   $ansi_fg = $flag_fg if $flag_fg;
 
-  my $prompt = expand($root ? $rprompt : $wprompt);
-  $left = expand($left); # TODO(sdh): pass fg/bg/root/etc, to this?
-  $right = expand($right);
-
   my %FILL = (
     DIAG => 'F(2571,2572,2573,20)',
     BOX => 'F(2596,2597,2598,2599,259a,259b,259c,259d,259e,259f)',
-    FLAG => 'F(9776,9777,9778,9779,977a,977b,977c,977d)',
+    FLAG => 'F(2630,2631,2632,2633,2634,2635,2636,2637)',
     TRAIN => 'F(#)',
     NONE => '',
   );
@@ -247,6 +244,19 @@ sub do_prompt {
   );
   die "No such separator: $sep" unless defined $SEP{uc $sep || 'TRIANGLE'};
   $sep = $SEP{uc $sep || 'TRIANGLE'};
+
+  # Allow passing %< and %> for separators in the left/right bubble
+  my $left_sep = " $bg<0 ";
+  my $right_sep = " $bg>0 ";
+  if ($ansi_bg eq '0') {
+    $left_sep = $right_sep = 'k")——("0';
+  } elsif (length($sep) < 14) {
+    $left_sep = $right_sep = " 0$bg\"|\"0 ";
+  }
+
+  my $prompt = expand($root ? $rprompt : $wprompt);
+  $left = expand($left, LEFT => $left_sep, RIGHT => $right_sep); # TODO(sdh): pass fg/bg/root/etc, to this?
+  $right = expand($right, LEFT => $left_sep, RIGHT => $right_sep);
 
   # TODO(sdh): include last exit code ?
   my $line;
@@ -458,16 +468,16 @@ sub do_print {
 
 # Expands prompt text.
 sub expand {
-  local($_) = shift;
+  local ($_, %_) = @_;
   # TODO(sdh): support more args?
-  $_ =~ s/%([uhHtWrRb%])/expand_char($1)/eg;
+  $_ =~ s/%([uhHtWrRb%<>])/expand_char($1, %_)/eg;
   return $_;
 }
 
 sub dq { "\"$_[0]\"" }
 
 sub expand_char {
-  local($_) = shift;
+  local ($_, %_) = @_;
   return dq('%') if $_ eq '%';
   return dq($ENV{USER}) if $_ eq 'u';
   return dq(long_host()) if $_ eq 'H';
@@ -477,6 +487,8 @@ sub expand_char {
   return dq(short_repo_dir()) if $_ eq 'R';
   return dq(short_repo_name()) if $_ eq 'r';
   return dq(short_repo_branch()) if $_ eq 'b';
+  return $_{LEFT} || '' if $_ eq '<';
+  return $_{RIGHT} || '' if $_ eq '>';
   die "Bad escape: $_";
 }
 
